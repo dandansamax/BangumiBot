@@ -1,3 +1,6 @@
 [submodule "bangumi_archive"]
 	path = bangumi_archive
 	url = git@github.com:bangumi/Archive.git
+[submodule "bangumi_common"]
+	path = bangumi_common
+	url = git@github.com:bangumi/common.git

@@ -5,7 +5,7 @@ import requests
 from zipfile import ZipFile
 
 def download_and_extract():
-    json_path = "./bangumi/aux/latest.json"
+    json_path = "./bangumi_archive/aux/latest.json"
     extract_path = "./raw_data"
     
     # Ensure the JSON file exists

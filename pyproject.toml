@@ -4,15 +4,20 @@ version = "0.1.0"
 description = "An ACGN expert chatbot powered by Bangumi database and Graph RAG"
 authors = ["Tianqi Xu <tianqi.xu@kaust.edu.sa>"]
 license = "MIT"
+package-mode = false
 
 
 [tool.poetry.dependencies]
 python = "^3.10"
 requests = "^2"
+neo4j = "^5"
+msgspec = "^0.19"
+pyyaml = "^6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8"
 ruff = "^0.9"
+ipykernel = "*"
 
 [build-system]
 requires = ["poetry>=0.12"]
