@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from neo4j import Driver, GraphDatabase
 
 from bangumi_common.py.platform import PLATFORM_CONFIG, Platform
-from raw_data_reader import SUBJECT_RELATION_CONFIG
+from raw_data_reader import SUBJECT_PERSON_CONFIG, SUBJECT_RELATION_CONFIG
 
 load_dotenv()
 
@@ -32,6 +32,7 @@ SUBJECT_LIMIT = 800
 PERSON_LIMIT = 800
 CHARACTER_LIMIT = 800
 SUBJECT_RELATION_LIMIT = 800
+SUBJECT_PERSON_LIMIT = 200
 
 CATEGORY_MAPPING = {
     1: "书籍",
@@ -103,16 +104,24 @@ class SubjectRelation:
     related_subject_id: int
     relation_type: int
 
+@dataclass
+class SubjectPersonRelation:
+    person_id: int
+    subject_id: int
+    position: int
 
 class BangumiDatabase:
     def __init__(self, driver: Driver):
         self.driver = driver
+        self.person_id_set = set()
 
     def close(self) -> None:
         self.driver.close()
         logger.info("Closed the Neo4j driver session.")
 
     def clear_database(self) -> None:
+        self.person_id_set = set()
+
         logger.info("Clearing database...")
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
@@ -170,6 +179,9 @@ class BangumiDatabase:
         if person.type == 0:
             logger.warning(f"Person {person.name} with id {person.id} has no type.")
             return
+
+        self.person_id_set.add(person.id)
+
         with self.driver.session() as session:
             session.run(
                 """
@@ -233,6 +245,27 @@ class BangumiDatabase:
                 """,
                 subject_id=subject_relation.subject_id,
                 related_subject_id=subject_relation.related_subject_id,
+                relation_type=relation_name,
+            )
+
+    def _insert_a_subject_person_relation(self, subject_person_relation: SubjectPersonRelation) -> None:
+        category_relations = SUBJECT_PERSON_CONFIG[
+            SUBJECT_CATEGORY_MAPPING[subject_person_relation.subject_id]
+        ]
+        relation_name = category_relations[subject_person_relation.position].cn
+        logger.info(
+            f"Inserting subject-person relation for subject {subject_person_relation.subject_id}"
+            + f" to person {subject_person_relation.person_id} into database with position {relation_name}.",
+        )
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (s:Subject {subject_id: $subject_id})
+                MATCH (p:Person {person_id: $person_id})
+                CREATE (s)-[:SubjectPersonRelation {type: $relation_type}]->(p)
+                """,
+                subject_id=subject_person_relation.subject_id,
+                person_id=subject_person_relation.person_id,
                 relation_type=relation_name,
             )
 
@@ -326,6 +359,38 @@ class BangumiDatabase:
                     ):
                         break
         logger.info("Subject relation insertion completed.")
+
+        # Initialize Subject-Person Relations
+        logger.info("Inserting subject-person relations from file.")
+        with open(
+            data_folder / "subject-persons.jsonlines", "r", encoding="utf-8"
+        ) as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                subject_person_relation = SubjectPersonRelation(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if k in SubjectPersonRelation.__annotations__
+                    }
+                )
+                if (
+                    subject_person_relation.subject_id in SUBJECT_CATEGORY_MAPPING
+                    and subject_person_relation.person_id in self.person_id_set
+                ):
+                    try:
+                        self._insert_a_subject_person_relation(subject_person_relation)
+                    except Exception as e:
+                        traceback.print_exc()
+                        logger.error(
+                            f"Error inserting subject-person relation: {subject_person_relation.subject_id} to {subject_person_relation.person_id}"
+                        )
+                    cnt += 1
+                    if SUBJECT_PERSON_LIMIT is not None and cnt >= SUBJECT_PERSON_LIMIT:
+                        break
+        logger.info("Subject-Person relation insertion completed.")
 
 
 if __name__ == "__main__":

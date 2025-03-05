@@ -23,3 +23,24 @@ SUBJECT_RELATION_CONFIG: dict[int, dict[int, SubjectRelation]] = msgspec.convert
     },
     type=dict[int, dict[int, SubjectRelation]],
 )
+
+class SubjectPerson(msgspec.Struct):
+    en: str
+    cn: str
+    jp: str
+    rdf: str = ""
+    desc: str = ""
+
+
+__subject_staffs = yaml.safe_load(
+    __common_path.joinpath("subject_staffs.yml").read_bytes()
+)
+
+SUBJECT_PERSON_CONFIG: dict[int, dict[int, SubjectPerson]] = msgspec.convert(
+    {
+        key: value
+        for key, value in __subject_staffs["staffs"].items()
+        if isinstance(key, int)
+    },
+    type=dict[int, dict[int, SubjectPerson]],
+)
