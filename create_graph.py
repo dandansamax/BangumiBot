@@ -3,11 +3,13 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import traceback
 
 from dotenv import load_dotenv
 from neo4j import Driver, GraphDatabase
 
 from bangumi_common.py.platform import PLATFORM_CONFIG, Platform
+from raw_data_reader import SUBJECT_RELATION_CONFIG
 
 load_dotenv()
 
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 SUBJECT_LIMIT = 800
 PERSON_LIMIT = 800
 CHARACTER_LIMIT = 800
+SUBJECT_RELATION_LIMIT = 800
 
 CATEGORY_MAPPING = {
     1: "书籍",
@@ -37,6 +40,8 @@ CATEGORY_MAPPING = {
     4: "游戏",
     6: "三次元",
 }
+
+SUBJECT_CATEGORY_MAPPING = {}
 
 PERSON_TYPE_MAPPING = {1: "个人", 2: "公司", 3: "组合"}
 
@@ -92,6 +97,13 @@ class Character:
     summary: str
 
 
+@dataclass
+class SubjectRelation:
+    subject_id: int
+    related_subject_id: int
+    relation_type: int
+
+
 class BangumiDatabase:
     def __init__(self, driver: Driver):
         self.driver = driver
@@ -120,6 +132,8 @@ class BangumiDatabase:
     def _insert_a_subject(self, subject: Subject) -> None:
         if subject.nsfw:
             return
+
+        SUBJECT_CATEGORY_MAPPING[subject.id] = subject.type
 
         logger.info(f"Inserting subject {subject.name} into database.")
         with self.driver.session() as session:
@@ -196,6 +210,32 @@ class BangumiDatabase:
                 summary=character.summary,
             )
 
+    def _insert_a_subject_relation(self, subject_relation: SubjectRelation) -> None:
+        logger.info(
+            f"Inserting subject relation for {subject_relation.subject_id}"
+            + f" to {subject_relation.related_subject_id} into database.",
+        )
+        category_relations = SUBJECT_RELATION_CONFIG[
+            SUBJECT_CATEGORY_MAPPING[subject_relation.related_subject_id]
+        ]
+        if subject_relation.relation_type not in category_relations:
+            relation_name = CATEGORY_MAPPING[
+                SUBJECT_CATEGORY_MAPPING[subject_relation.related_subject_id]
+            ]
+        else:
+            relation_name = category_relations[subject_relation.relation_type].cn
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (s1:Subject {subject_id: $subject_id})
+                MATCH (s2:Subject {subject_id: $related_subject_id})
+                CREATE (s1)-[:SubjectRelation {type: $relation_type}]->(s2)
+                """,
+                subject_id=subject_relation.subject_id,
+                related_subject_id=subject_relation.related_subject_id,
+                relation_type=relation_name,
+            )
+
     def initilize_database(self, data_folder: Path = Path("raw_data")) -> None:
         logger.info("Initializing database.")
         self.clear_database()
@@ -251,6 +291,41 @@ class BangumiDatabase:
                 cnt += 1
                 if CHARACTER_LIMIT is not None and cnt >= CHARACTER_LIMIT:
                     break
+
+        # Initialize Subject Relations
+        logger.info("Inserting subject relations from file.")
+        with open(
+            data_folder / "subject-relations.jsonlines", "r", encoding="utf-8"
+        ) as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                subject_relation = SubjectRelation(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if k in SubjectRelation.__annotations__
+                    }
+                )
+                if (
+                    subject_relation.subject_id in SUBJECT_CATEGORY_MAPPING
+                    and subject_relation.related_subject_id in SUBJECT_CATEGORY_MAPPING
+                ):
+                    try:
+                        self._insert_a_subject_relation(subject_relation)
+                    except Exception as e:
+                        traceback.print_exc()
+                        logger.error(
+                            f"Error inserting subject relation: {subject_relation.subject_id} to {subject_relation.related_subject_id}"
+                        )
+                    cnt += 1
+                    if (
+                        SUBJECT_RELATION_LIMIT is not None
+                        and cnt >= SUBJECT_RELATION_LIMIT
+                    ):
+                        break
+        logger.info("Subject relation insertion completed.")
 
 
 if __name__ == "__main__":
