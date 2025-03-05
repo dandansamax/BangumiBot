@@ -1,9 +1,19 @@
 import json
 import logging
-from neo4j import Driver, GraphDatabase
-from bangumi_common.py.platform import Platform, PLATFORM_CONFIG
+import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from dotenv import load_dotenv
+from neo4j import Driver, GraphDatabase
+
+from bangumi_common.py.platform import PLATFORM_CONFIG, Platform
+
+load_dotenv()
+
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")  # Default to local
+USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
+PASSWORD = os.environ.get("NEO4J_PASSWORD", "bangumibot")
 
 # Set up logging configuration
 logging.basicConfig(
@@ -18,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 SUBJECT_LIMIT = 800
 PERSON_LIMIT = 800
+CHARACTER_LIMIT = 800
 
 CATEGORY_MAPPING = {
     1: "书籍",
@@ -37,6 +48,13 @@ CAREER_MAPPING = {
     "seiyu": "声优",
     "mangaka": "漫画家",
     "artist": "音乐人",
+}
+
+CHARACTER_ROLE_MAPPING = {
+    1: "角色",
+    2: "机体",
+    3: "组织",
+    4: "未知",
 }
 
 
@@ -63,6 +81,15 @@ class Person:
     infobox: str
     summary: str
     career: list[str]
+
+
+@dataclass
+class Character:
+    id: int
+    role: int
+    name: str
+    infobox: str
+    summary: str
 
 
 class BangumiDatabase:
@@ -126,6 +153,9 @@ class BangumiDatabase:
 
     def _insert_a_person(self, person: Person):
         logger.info(f"Inserting person {person.name} into database.")
+        if person.type == 0:
+            logger.warning(f"Person {person.name} with id {person.id} has no type.")
+            return
         with self.driver.session() as session:
             session.run(
                 """
@@ -141,13 +171,30 @@ class BangumiDatabase:
                 id=person.id,
                 name=person.name,
                 type=PERSON_TYPE_MAPPING[person.type],
-                infobox=person.infobox, #TODO: parse infobox
+                infobox=person.infobox,  # TODO: parse infobox
                 summary=person.summary,
                 career=[CAREER_MAPPING[career] for career in person.career],
             )
 
-    # def _insert_a_character(self, character: Character):
-    #     pass
+    def _insert_a_character(self, character: Character):
+        logger.info(f"Inserting character {character.name} into database.")
+        with self.driver.session() as session:
+            session.run(
+                """
+                CREATE (c:Character {
+                    character_id: $id,
+                    role: $role,
+                    name: $name,
+                    infobox: $infobox,
+                    summary: $summary
+                })
+                """,
+                id=character.id,
+                role=CHARACTER_ROLE_MAPPING[character.role],
+                name=character.name,
+                infobox=character.infobox,
+                summary=character.summary,
+            )
 
     def initilize_database(self, data_folder: Path = Path("raw_data")) -> None:
         logger.info("Initializing database.")
@@ -190,17 +237,25 @@ class BangumiDatabase:
                     break
         logger.info("Person insertion completed.")
 
+        # Initialize Characters
+        logger.info("Inserting characters from file.")
+        with open(data_folder / "character.jsonlines", "r", encoding="utf-8") as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                character = Character(
+                    **{k: v for k, v in data.items() if k in Character.__annotations__}
+                )
+                self._insert_a_character(character)
+                cnt += 1
+                if CHARACTER_LIMIT is not None and cnt >= CHARACTER_LIMIT:
+                    break
+
 
 if __name__ == "__main__":
-    NEO4J_URI = "bolt://localhost:7687"  # Change if using a remote server
-    USERNAME = "neo4j"
-    PASSWORD = "bangumibot"
     driver = GraphDatabase.driver(NEO4J_URI, auth=(USERNAME, PASSWORD))
     logger.info("Connected to Neo4j database.")
     db = BangumiDatabase(driver)
-    try:
-        db.initilize_database()
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-    finally:
-        db.close()
+    db.initilize_database()
+    db.close()
