@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-import traceback
 
 from dotenv import load_dotenv
 from neo4j import Driver, GraphDatabase
@@ -158,15 +159,27 @@ class BangumiDatabase:
     def _initliaze_constraints(self) -> None:
         logger.info("Initializing constraints.")
         with self.driver.session() as session:
-            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_subject_id' RETURN count(*) AS constraint_exists;")
+            result = session.run(
+                "SHOW CONSTRAINTS YIELD name WHERE name = 'unique_subject_id' RETURN count(*) AS constraint_exists;"
+            )
             if result.value()[0] == 0:
-                session.run("CREATE CONSTRAINT unique_subject_id FOR (s:Subject) REQUIRE s.subject_id IS UNIQUE;")
-            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_person_id' RETURN count(*) AS constraint_exists;")
+                session.run(
+                    "CREATE CONSTRAINT unique_subject_id FOR (s:Subject) REQUIRE s.subject_id IS UNIQUE;"
+                )
+            result = session.run(
+                "SHOW CONSTRAINTS YIELD name WHERE name = 'unique_person_id' RETURN count(*) AS constraint_exists;"
+            )
             if result.value()[0] == 0:
-                session.run("CREATE CONSTRAINT unique_person_id FOR (p:Person) REQUIRE p.person_id IS UNIQUE;")
-            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_character_id' RETURN count(*) AS constraint_exists;")
+                session.run(
+                    "CREATE CONSTRAINT unique_person_id FOR (p:Person) REQUIRE p.person_id IS UNIQUE;"
+                )
+            result = session.run(
+                "SHOW CONSTRAINTS YIELD name WHERE name = 'unique_character_id' RETURN count(*) AS constraint_exists;"
+            )
             if result.value()[0] == 0:
-                session.run("CREATE CONSTRAINT unique_character_id FOR (c:Character) REQUIRE c.character_id IS UNIQUE;")
+                session.run(
+                    "CREATE CONSTRAINT unique_character_id FOR (c:Character) REQUIRE c.character_id IS UNIQUE;"
+                )
 
     def _insert_a_platform(self, platform: Platform, category: int) -> None:
         name = CATEGORY_MAPPING[category] + "/" + platform.type_cn
@@ -347,36 +360,51 @@ class BangumiDatabase:
                 MATCH (p:Person {person_id: $person_id}) 
                 MATCH (c:Character {character_id: $character_id}) 
                 MATCH (s:Subject {subject_id: $subject_id}) 
-                MERGE (p)-[:Played]->(r:RolePerformance {role: "$character_name in $subject_name"})
+                MERGE (p)-[:Played]->(r:RolePerformance {role: $character_name + " in " + $subject_name})
                 MERGE (r)-[:AsCharacter]->(c)
                 MERGE (r)-[:In]->(s);
                 """,
                 person_id=person_character_relation.person_id,
                 character_id=person_character_relation.character_id,
                 subject_id=person_character_relation.subject_id,
-                character_name=self.character_name_mapping[person_character_relation.character_id],
-                subject_name=self.subject_name_mapping[person_character_relation.subject_id],
+                character_name=self.character_name_mapping[
+                    person_character_relation.character_id
+                ],
+                subject_name=self.subject_name_mapping[
+                    person_character_relation.subject_id
+                ],
             )
 
     def initilize_database(self, data_folder: Path = Path("raw_data")) -> None:
         logger.info("Initializing database.")
+        total_start = time.time()
+
+        time_records = {}
+
+        # Clear Database
+        start = time.time()
         self.clear_database()
+        time_records["Clear Database"] = time.time() - start
 
         # Initialize platforms
+        start = time.time()
         for category, item_list in PLATFORM_CONFIG.items():
             for platform in item_list.values():
                 self._insert_a_platform(platform, category)
+        time_records["Initialize Platforms"] = time.time() - start
 
-        # Initilaize Constraints
+        # Initialize Constraints
+        start = time.time()
         self._initliaze_constraints()
+        time_records["Initialize Constraints"] = time.time() - start
 
-        # Initialize subjects
+        # Initialize Subjects
+        start = time.time()
         logger.info("Inserting subjects from file.")
         with open(data_folder / "subject.jsonlines", "r", encoding="utf-8") as f:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 subject = Subject(
                     **{k: v for k, v in data.items() if k in Subject.__annotations__}
                 )
@@ -384,15 +412,15 @@ class BangumiDatabase:
                 cnt += 1
                 if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
-        logger.info("Subject insertion completed.")
+        time_records["Insert Subjects"] = time.time() - start
 
         # Initialize Persons
+        start = time.time()
         logger.info("Inserting persons from file.")
         with open(data_folder / "person.jsonlines", "r", encoding="utf-8") as f:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 person = Person(
                     **{k: v for k, v in data.items() if k in Person.__annotations__}
                 )
@@ -400,15 +428,15 @@ class BangumiDatabase:
                 cnt += 1
                 if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
-        logger.info("Person insertion completed.")
+        time_records["Insert Persons"] = time.time() - start
 
         # Initialize Characters
+        start = time.time()
         logger.info("Inserting characters from file.")
         with open(data_folder / "character.jsonlines", "r", encoding="utf-8") as f:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 character = Character(
                     **{k: v for k, v in data.items() if k in Character.__annotations__}
                 )
@@ -416,8 +444,10 @@ class BangumiDatabase:
                 cnt += 1
                 if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
+        time_records["Insert Characters"] = time.time() - start
 
         # Initialize Subject Relations
+        start = time.time()
         logger.info("Inserting subject relations from file.")
         with open(
             data_folder / "subject-relations.jsonlines", "r", encoding="utf-8"
@@ -425,7 +455,6 @@ class BangumiDatabase:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 subject_relation = SubjectRelation(
                     **{
                         k: v
@@ -440,20 +469,18 @@ class BangumiDatabase:
                 ):
                     try:
                         self._insert_a_subject_relation(subject_relation)
-                    except Exception as e:
+                    except Exception:
                         traceback.print_exc()
                         logger.error(
                             f"Error inserting subject relation: {subject_relation.subject_id} to {subject_relation.related_subject_id}"
                         )
                     cnt += 1
-                    if (
-                        RELATION_LIMIT is not None
-                        and cnt >= RELATION_LIMIT
-                    ):
+                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
                         break
-        logger.info("Subject relation insertion completed.")
+        time_records["Insert Subject Relations"] = time.time() - start
 
         # Initialize Subject-Person Relations
+        start = time.time()
         logger.info("Inserting subject-person relations from file.")
         with open(
             data_folder / "subject-persons.jsonlines", "r", encoding="utf-8"
@@ -461,7 +488,6 @@ class BangumiDatabase:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 subject_person_relation = SubjectPersonRelation(
                     **{
                         k: v
@@ -475,7 +501,7 @@ class BangumiDatabase:
                 ):
                     try:
                         self._insert_a_subject_person_relation(subject_person_relation)
-                    except Exception as e:
+                    except Exception:
                         traceback.print_exc()
                         logger.error(
                             f"Error inserting subject-person relation: {subject_person_relation.subject_id} to {subject_person_relation.person_id}"
@@ -483,9 +509,10 @@ class BangumiDatabase:
                     cnt += 1
                     if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
                         break
-        logger.info("Subject-Person relation insertion completed.")
+        time_records["Insert Subject-Person Relations"] = time.time() - start
 
         # Initialize Subject-Character Relations
+        start = time.time()
         logger.info("Inserting subject-character relations from file.")
         with open(
             data_folder / "subject-characters.jsonlines", "r", encoding="utf-8"
@@ -493,7 +520,6 @@ class BangumiDatabase:
             cnt = 0
             for line in f:
                 data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
                 subject_character_relation = SubjectCharacterRelation(
                     **{
                         k: v
@@ -502,12 +528,16 @@ class BangumiDatabase:
                     }
                 )
                 if (
-                    subject_character_relation.subject_id in self.subject_category_mapping
-                    and subject_character_relation.character_id in self.character_name_mapping
+                    subject_character_relation.subject_id
+                    in self.subject_category_mapping
+                    and subject_character_relation.character_id
+                    in self.character_name_mapping
                 ):
                     try:
-                        self._insert_a_subject_character_relation(subject_character_relation)
-                    except Exception as e:
+                        self._insert_a_subject_character_relation(
+                            subject_character_relation
+                        )
+                    except Exception:
                         traceback.print_exc()
                         logger.error(
                             f"Error inserting subject-character relation: {subject_character_relation.subject_id} to {subject_character_relation.character_id}"
@@ -515,39 +545,14 @@ class BangumiDatabase:
                     cnt += 1
                     if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
                         break
+        time_records["Insert Subject-Character Relations"] = time.time() - start
 
-        # Initialize Person-Character Relations
-        logger.info("Inserting person-character relations from file.")
-        with open(
-            data_folder / "person-characters.jsonlines", "r", encoding="utf-8"
-        ) as f:
-            cnt = 0
-            for line in f:
-                data = json.loads(line)
-                # Create Subject instance while ignoring missing keys
-                person_character_relation = PersonCharacterRelation(
-                    **{
-                        k: v
-                        for k, v in data.items()
-                        if k in PersonCharacterRelation.__annotations__
-                    }
-                )
-                if (
-                    person_character_relation.person_id in self.person_id_set
-                    and person_character_relation.character_id in self.character_name_mapping
-                    and person_character_relation.subject_id in self.subject_name_mapping
-                ):
-                    try:
-                        self._insert_a_person_character_relation(person_character_relation)
-                    except Exception as e:
-                        traceback.print_exc()
-                        logger.error(
-                            f"Error inserting person-character relation: {person_character_relation.person_id} to {person_character_relation.character_id}"
-                        )
-                    cnt += 1
-                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
-                        break
-        logger.info("Person-Character relation insertion completed.")
+        # Final time logging
+        total_time = time.time() - total_start
+        logger.info("Database initialization completed. Time summary:")
+        for section, duration in time_records.items():
+            logger.info(f"{section}: {duration:.2f} seconds")
+        logger.info(f"Total time: {total_time:.2f} seconds")
 
 
 if __name__ == "__main__":
