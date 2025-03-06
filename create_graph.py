@@ -19,20 +19,25 @@ PASSWORD = os.environ.get("NEO4J_PASSWORD", "bangumibot")
 
 # Set up logging configuration
 logging.basicConfig(
-    level=logging.INFO,  # Set level to INFO, DEBUG for more detailed logs
+    level=logging.INFO,  # Default level for all handlers
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(),  # Log to console
-        # logging.FileHandler("bangumi_database.log", mode="w"),  # Log to a file
+        logging.StreamHandler(),  # Log to console (inherits level from basicConfig)
     ],
 )
-logger = logging.getLogger(__name__)
 
-SUBJECT_LIMIT = 800
-PERSON_LIMIT = 800
-CHARACTER_LIMIT = 800
-SUBJECT_RELATION_LIMIT = 800
-SUBJECT_PERSON_LIMIT = 200
+# Create a file handler with WARNING level
+file_handler = logging.FileHandler("local/bangumi_database.log", mode="w")
+file_handler.setLevel(logging.WARNING)
+# Set the same format as the basicConfig
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+# Get the root logger and add the file handler
+logger = logging.getLogger(__name__)
+logger.addHandler(file_handler)
+
+ENTITY_LIMIT = None
+RELATION_LIMIT = None
 
 CATEGORY_MAPPING = {
     1: "书籍",
@@ -41,8 +46,6 @@ CATEGORY_MAPPING = {
     4: "游戏",
     6: "三次元",
 }
-
-SUBJECT_CATEGORY_MAPPING = {}
 
 PERSON_TYPE_MAPPING = {1: "个人", 2: "公司", 3: "组合"}
 
@@ -61,6 +64,12 @@ CHARACTER_ROLE_MAPPING = {
     2: "机体",
     3: "组织",
     4: "未知",
+}
+
+SUBJECT_CHARACTER_TYPE_MAPPING = {
+    1: "主角",
+    2: "配角",
+    3: "客串",
 }
 
 
@@ -104,16 +113,35 @@ class SubjectRelation:
     related_subject_id: int
     relation_type: int
 
+
 @dataclass
 class SubjectPersonRelation:
     person_id: int
     subject_id: int
     position: int
 
+
+@dataclass
+class SubjectCharacterRelation:
+    character_id: int
+    subject_id: int
+    type: int
+
+
+@dataclass
+class PersonCharacterRelation:
+    person_id: int
+    character_id: int
+    subject_id: int
+
+
 class BangumiDatabase:
     def __init__(self, driver: Driver):
         self.driver = driver
+        self.subject_category_mapping = {}
+        self.subject_name_mapping = {}
         self.person_id_set = set()
+        self.character_name_mapping = {}
 
     def close(self) -> None:
         self.driver.close()
@@ -126,6 +154,19 @@ class BangumiDatabase:
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
         logger.info("Database cleared.")
+
+    def _initliaze_constraints(self) -> None:
+        logger.info("Initializing constraints.")
+        with self.driver.session() as session:
+            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_subject_id' RETURN count(*) AS constraint_exists;")
+            if result.value()[0] == 0:
+                session.run("CREATE CONSTRAINT unique_subject_id FOR (s:Subject) REQUIRE s.subject_id IS UNIQUE;")
+            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_person_id' RETURN count(*) AS constraint_exists;")
+            if result.value()[0] == 0:
+                session.run("CREATE CONSTRAINT unique_person_id FOR (p:Person) REQUIRE p.person_id IS UNIQUE;")
+            result = session.run("SHOW CONSTRAINTS YIELD name WHERE name = 'unique_character_id' RETURN count(*) AS constraint_exists;")
+            if result.value()[0] == 0:
+                session.run("CREATE CONSTRAINT unique_character_id FOR (c:Character) REQUIRE c.character_id IS UNIQUE;")
 
     def _insert_a_platform(self, platform: Platform, category: int) -> None:
         name = CATEGORY_MAPPING[category] + "/" + platform.type_cn
@@ -142,7 +183,8 @@ class BangumiDatabase:
         if subject.nsfw:
             return
 
-        SUBJECT_CATEGORY_MAPPING[subject.id] = subject.type
+        self.subject_category_mapping[subject.id] = subject.type
+        self.subject_name_mapping[subject.id] = subject.name
 
         logger.info(f"Inserting subject {subject.name} into database.")
         with self.driver.session() as session:
@@ -160,7 +202,7 @@ class BangumiDatabase:
                 })
 
                 MERGE (p:Platform {platform_id: $platform_id, category: $category})
-                CREATE (s)-[:BELONG_TO]->(p)
+                MERGE (s)-[:BELONG_TO]->(p)
                 """,
                 id=subject.id,
                 name=subject.name,
@@ -204,6 +246,7 @@ class BangumiDatabase:
 
     def _insert_a_character(self, character: Character):
         logger.info(f"Inserting character {character.name} into database.")
+        self.character_name_mapping[character.id] = character.name
         with self.driver.session() as session:
             session.run(
                 """
@@ -228,11 +271,11 @@ class BangumiDatabase:
             + f" to {subject_relation.related_subject_id} into database.",
         )
         category_relations = SUBJECT_RELATION_CONFIG[
-            SUBJECT_CATEGORY_MAPPING[subject_relation.related_subject_id]
+            self.subject_category_mapping[subject_relation.related_subject_id]
         ]
         if subject_relation.relation_type not in category_relations:
             relation_name = CATEGORY_MAPPING[
-                SUBJECT_CATEGORY_MAPPING[subject_relation.related_subject_id]
+                self.subject_category_mapping[subject_relation.related_subject_id]
             ]
         else:
             relation_name = category_relations[subject_relation.relation_type].cn
@@ -241,16 +284,18 @@ class BangumiDatabase:
                 """
                 MATCH (s1:Subject {subject_id: $subject_id})
                 MATCH (s2:Subject {subject_id: $related_subject_id})
-                CREATE (s1)-[:SubjectRelation {type: $relation_type}]->(s2)
+                MERGE (s1)-[:SubjectRelation {type: $relation_type}]->(s2)
                 """,
                 subject_id=subject_relation.subject_id,
                 related_subject_id=subject_relation.related_subject_id,
                 relation_type=relation_name,
             )
 
-    def _insert_a_subject_person_relation(self, subject_person_relation: SubjectPersonRelation) -> None:
+    def _insert_a_subject_person_relation(
+        self, subject_person_relation: SubjectPersonRelation
+    ) -> None:
         category_relations = SUBJECT_PERSON_CONFIG[
-            SUBJECT_CATEGORY_MAPPING[subject_person_relation.subject_id]
+            self.subject_category_mapping[subject_person_relation.subject_id]
         ]
         relation_name = category_relations[subject_person_relation.position].cn
         logger.info(
@@ -262,11 +307,55 @@ class BangumiDatabase:
                 """
                 MATCH (s:Subject {subject_id: $subject_id})
                 MATCH (p:Person {person_id: $person_id})
-                CREATE (s)-[:SubjectPersonRelation {type: $relation_type}]->(p)
+                MERGE (s)-[:SubjectPersonRelation {type: $relation_type}]->(p)
                 """,
                 subject_id=subject_person_relation.subject_id,
                 person_id=subject_person_relation.person_id,
                 relation_type=relation_name,
+            )
+
+    def _insert_a_subject_character_relation(
+        self, subject_character_relation: SubjectCharacterRelation
+    ) -> None:
+        logger.info(
+            f"Inserting subject-character relation for subject {subject_character_relation.subject_id}"
+            + f" and character {subject_character_relation.character_id} into database.",
+        )
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (c:Character {character_id: $character_id})
+                MATCH (s:Subject {subject_id: $subject_id})
+                MERGE (c)-[:AppearsIn {type: $type}]->(s)
+                """,
+                character_id=subject_character_relation.character_id,
+                subject_id=subject_character_relation.subject_id,
+                type=SUBJECT_CHARACTER_TYPE_MAPPING[subject_character_relation.type],
+            )
+
+    def _insert_a_person_character_relation(
+        self, person_character_relation: PersonCharacterRelation
+    ) -> None:
+        logger.info(
+            f"Inserting person-character relation for person {person_character_relation.person_id}"
+            + f" and character {person_character_relation.character_id} in subject "
+            + f"{person_character_relation.subject_id} into database.",
+        )
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (p:Person {person_id: $person_id}) 
+                MATCH (c:Character {character_id: $character_id}) 
+                MATCH (s:Subject {subject_id: $subject_id}) 
+                MERGE (p)-[:Played]->(r:RolePerformance {role: "$character_name in $subject_name"})
+                MERGE (r)-[:AsCharacter]->(c)
+                MERGE (r)-[:In]->(s);
+                """,
+                person_id=person_character_relation.person_id,
+                character_id=person_character_relation.character_id,
+                subject_id=person_character_relation.subject_id,
+                character_name=self.character_name_mapping[person_character_relation.character_id],
+                subject_name=self.subject_name_mapping[person_character_relation.subject_id],
             )
 
     def initilize_database(self, data_folder: Path = Path("raw_data")) -> None:
@@ -277,6 +366,9 @@ class BangumiDatabase:
         for category, item_list in PLATFORM_CONFIG.items():
             for platform in item_list.values():
                 self._insert_a_platform(platform, category)
+
+        # Initilaize Constraints
+        self._initliaze_constraints()
 
         # Initialize subjects
         logger.info("Inserting subjects from file.")
@@ -290,7 +382,7 @@ class BangumiDatabase:
                 )
                 self._insert_a_subject(subject)
                 cnt += 1
-                if SUBJECT_LIMIT is not None and cnt >= SUBJECT_LIMIT:
+                if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
         logger.info("Subject insertion completed.")
 
@@ -306,7 +398,7 @@ class BangumiDatabase:
                 )
                 self._insert_a_person(person)
                 cnt += 1
-                if PERSON_LIMIT is not None and cnt >= PERSON_LIMIT:
+                if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
         logger.info("Person insertion completed.")
 
@@ -322,7 +414,7 @@ class BangumiDatabase:
                 )
                 self._insert_a_character(character)
                 cnt += 1
-                if CHARACTER_LIMIT is not None and cnt >= CHARACTER_LIMIT:
+                if ENTITY_LIMIT is not None and cnt >= ENTITY_LIMIT:
                     break
 
         # Initialize Subject Relations
@@ -342,8 +434,9 @@ class BangumiDatabase:
                     }
                 )
                 if (
-                    subject_relation.subject_id in SUBJECT_CATEGORY_MAPPING
-                    and subject_relation.related_subject_id in SUBJECT_CATEGORY_MAPPING
+                    subject_relation.subject_id in self.subject_category_mapping
+                    and subject_relation.related_subject_id
+                    in self.subject_category_mapping
                 ):
                     try:
                         self._insert_a_subject_relation(subject_relation)
@@ -354,8 +447,8 @@ class BangumiDatabase:
                         )
                     cnt += 1
                     if (
-                        SUBJECT_RELATION_LIMIT is not None
-                        and cnt >= SUBJECT_RELATION_LIMIT
+                        RELATION_LIMIT is not None
+                        and cnt >= RELATION_LIMIT
                     ):
                         break
         logger.info("Subject relation insertion completed.")
@@ -377,7 +470,7 @@ class BangumiDatabase:
                     }
                 )
                 if (
-                    subject_person_relation.subject_id in SUBJECT_CATEGORY_MAPPING
+                    subject_person_relation.subject_id in self.subject_category_mapping
                     and subject_person_relation.person_id in self.person_id_set
                 ):
                     try:
@@ -388,9 +481,73 @@ class BangumiDatabase:
                             f"Error inserting subject-person relation: {subject_person_relation.subject_id} to {subject_person_relation.person_id}"
                         )
                     cnt += 1
-                    if SUBJECT_PERSON_LIMIT is not None and cnt >= SUBJECT_PERSON_LIMIT:
+                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
                         break
         logger.info("Subject-Person relation insertion completed.")
+
+        # Initialize Subject-Character Relations
+        logger.info("Inserting subject-character relations from file.")
+        with open(
+            data_folder / "subject-characters.jsonlines", "r", encoding="utf-8"
+        ) as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                subject_character_relation = SubjectCharacterRelation(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if k in SubjectCharacterRelation.__annotations__
+                    }
+                )
+                if (
+                    subject_character_relation.subject_id in self.subject_category_mapping
+                    and subject_character_relation.character_id in self.character_name_mapping
+                ):
+                    try:
+                        self._insert_a_subject_character_relation(subject_character_relation)
+                    except Exception as e:
+                        traceback.print_exc()
+                        logger.error(
+                            f"Error inserting subject-character relation: {subject_character_relation.subject_id} to {subject_character_relation.character_id}"
+                        )
+                    cnt += 1
+                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
+                        break
+
+        # Initialize Person-Character Relations
+        logger.info("Inserting person-character relations from file.")
+        with open(
+            data_folder / "person-characters.jsonlines", "r", encoding="utf-8"
+        ) as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                person_character_relation = PersonCharacterRelation(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if k in PersonCharacterRelation.__annotations__
+                    }
+                )
+                if (
+                    person_character_relation.person_id in self.person_id_set
+                    and person_character_relation.character_id in self.character_name_mapping
+                    and person_character_relation.subject_id in self.subject_name_mapping
+                ):
+                    try:
+                        self._insert_a_person_character_relation(person_character_relation)
+                    except Exception as e:
+                        traceback.print_exc()
+                        logger.error(
+                            f"Error inserting person-character relation: {person_character_relation.person_id} to {person_character_relation.character_id}"
+                        )
+                    cnt += 1
+                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
+                        break
+        logger.info("Person-Character relation insertion completed.")
 
 
 if __name__ == "__main__":
