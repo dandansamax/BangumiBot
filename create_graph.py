@@ -547,6 +547,45 @@ class BangumiDatabase:
                         break
         time_records["Insert Subject-Character Relations"] = time.time() - start
 
+        # Initialize Person-Character Relations
+        start = time.time()
+        logger.info("Inserting person-character relations from file.")
+        with open(
+            data_folder / "person-characters.jsonlines", "r", encoding="utf-8"
+        ) as f:
+            cnt = 0
+            for line in f:
+                data = json.loads(line)
+                # Create Subject instance while ignoring missing keys
+                person_character_relation = PersonCharacterRelation(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if k in PersonCharacterRelation.__annotations__
+                    }
+                )
+                if (
+                    person_character_relation.person_id in self.person_id_set
+                    and person_character_relation.character_id
+                    in self.character_name_mapping
+                    and person_character_relation.subject_id
+                    in self.subject_name_mapping
+                ):
+                    try:
+                        self._insert_a_person_character_relation(
+                            person_character_relation
+                        )
+                    except Exception:
+                        traceback.print_exc()
+                        logger.error(
+                            f"Error inserting person-character relation: {person_character_relation.person_id} to {person_character_relation.character_id}"
+                        )
+                    cnt += 1
+                    if RELATION_LIMIT is not None and cnt >= RELATION_LIMIT:
+                        break
+        logger.info("Person-Character relation insertion completed.")
+        time_records["Insert Person-Character Relations"] = time.time() - start
+
         # Final time logging
         total_time = time.time() - total_start
         logger.info("Database initialization completed. Time summary:")
